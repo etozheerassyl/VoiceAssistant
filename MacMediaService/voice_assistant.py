@@ -381,7 +381,8 @@ def _synthesize_to_cache(txt: str) -> tuple:
                                 f_out.write(dl_resp.read())
                         if os.path.exists(cached_remote_wav) and os.path.getsize(cached_remote_wav) > 1024:
                             return cached_remote_wav, "omnivoice"
-                _omnivoice_mark_failed(f"HTTP {resp.status_code}")
+                else:
+                    _omnivoice_mark_failed(f"HTTP {resp.status_code}")
             except Exception as e:
                 _omnivoice_mark_failed(str(e))
 
