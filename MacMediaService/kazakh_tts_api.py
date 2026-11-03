@@ -170,16 +170,24 @@ def synthesize(req: TTSRequest, background_tasks: BackgroundTasks):
 
     t0 = time.time()
     with _model_lock:
+        try:
+            from omnivoice.models.omnivoice import OmniVoiceGenerationConfig
+            gen_cfg = OmniVoiceGenerationConfig(num_step=12)
+        except Exception:
+            gen_cfg = None
+
         if prompt is not None:
             audio = _model.generate(
                 text=text,
                 language="Kazakh",
-                voice_clone_prompt=prompt
+                voice_clone_prompt=prompt,
+                generation_config=gen_cfg
             )
         else:
             audio = _model.generate(
                 text=text,
-                language="Kazakh"
+                language="Kazakh",
+                generation_config=gen_cfg
             )
 
     synth_time = time.time() - t0
