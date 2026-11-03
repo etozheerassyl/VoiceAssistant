@@ -37,8 +37,9 @@ AI_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_co
 def load_ai_config() -> dict:
     defaults = {
         "remote_ai_host": os.getenv("REMOTE_AI_HOST", "").strip(),
+        "voice_gender": os.getenv("VOICE_GENDER", "male").strip().lower(),
         "remote_ollama_port": int(os.getenv("REMOTE_OLLAMA_PORT", "11434")),
-        "remote_ollama_model": os.getenv("REMOTE_OLLAMA_MODEL", "qwen2.5:3b"),
+        "remote_ollama_model": os.getenv("REMOTE_OLLAMA_MODEL", "qwen2.5:7b"),
         "remote_tts_port": int(os.getenv("REMOTE_TTS_PORT", "8001")),
         "fallback_local_ollama": True,
         "local_ollama_url": "http://127.0.0.1:11434/api/chat",
@@ -78,15 +79,58 @@ _chat_history = []     # История последних реплик диал
 _web_cache = {}        # Кэш поисковых запросов: query -> (timestamp, snippets)
 _event_broadcast_fn = None  # Callback сервера для асинхронных событий на ESP32 (окончание таймера и т.п.)
 
-# Нейроголоса Microsoft Edge и локальный/удалённый OmniVoice API
-EDGE_VOICE_RU = "ru-RU-SvetlanaNeural"
-EDGE_VOICE_KK = "kk-KZ-DauletNeural"
+# ============================================================================
+# Профили голосов (Мужской / Женский) — согласованы для казахского и русского
+# ============================================================================
+VOICE_PROFILES = {
+    "male": {
+        "kk": "kk-KZ-DauletNeural",    # Естественный казахский мужской нейроголос (Дәулет)
+        "ru": "ru-RU-DmitryNeural",    # Естественный русский мужской нейроголос (Дмитрий)
+        "omni": "male",                # Локальный/удалённый OmniVoice: мужской голос Доса
+        "name_ru": "Мужской (Дмитрий / Дәулет)",
+        "name_kz": "Ер адам дауысы (Дәулет)",
+    },
+    "female": {
+        "kk": "kk-KZ-AigulNeural",     # Естественный казахский женский нейроголос (Айгүл)
+        "ru": "ru-RU-SvetlanaNeural",  # Естественный русский женский нейроголос (Светлана)
+        "omni": "female",              # Локальный/удалённый OmniVoice: женский голос
+        "name_ru": "Женский (Светлана / Айгүл)",
+        "name_kz": "Әйел дауысы (Айгүл)",
+    },
+}
+
 EDGE_RATE = "+0%"
 LOCAL_TTS_API_URL = "http://127.0.0.1:8001/synthesize"
 LOCAL_TTS_HEALTH_URL = "http://127.0.0.1:8001/health"
 OMNIVOICE_SYNTH_TIMEOUT = 8.0   # Дольше ждать синтез нет смысла — Edge TTS отвечает за ~0.5-1 сек
 OMNIVOICE_RETRY_SEC = 300       # После сбоя/неготовности OmniVoice не опрашивается 5 минут
 _omnivoice_state = ("unknown", 0.0)  # (статус, timestamp последней проверки)
+
+
+def get_voice_gender() -> str:
+    """Возвращает текущий пол голоса ('male' или 'female')."""
+    g = (_ai_config.get("voice_gender") or "male").strip().lower()
+    return "female" if g in ("female", "woman", "girl", "әйел", "қыз", "женский") else "male"
+
+
+def set_voice_gender(gender: str) -> str:
+    """Переключает пол голоса ('male' или 'female') и сохраняет выбор в ai_config.json."""
+    global _ai_config
+    norm = "female" if gender.strip().lower() in ("female", "woman", "girl", "әйел", "қыз", "женский") else "male"
+    _ai_config["voice_gender"] = norm
+    try:
+        cfg_path = AI_CONFIG_PATH
+        existing = {}
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing["voice_gender"] = norm
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        logger.info(f"[VOICE CONFIG] Пол голоса переключён на: {norm.upper()} ({VOICE_PROFILES[norm]['name_ru']})")
+    except Exception as e:
+        logger.warning(f"[VOICE CONFIG] Не удалось сохранить voice_gender: {e}")
+    return norm
 
 
 def get_ollama_endpoint() -> tuple:
@@ -225,10 +269,34 @@ def is_tts_speaking_or_tail() -> bool:
         return time.time() < _tts_mute_until
 
 
+_HOMOGLYPHS = {
+    'a': 'а', 'e': 'е', 'i': 'і', 'o': 'о', 'p': 'р', 'c': 'с', 'y': 'у', 'x': 'х',
+    'A': 'А', 'B': 'В', 'E': 'Е', 'K': 'К', 'M': 'М', 'H': 'Н', 'O': 'О', 'P': 'Р',
+    'C': 'С', 'T': 'Т', 'Y': 'Ү', 'X': 'Х'
+}
+
+def _fix_mixed_word(w: str) -> str:
+    has_cyr = bool(re.search(r'[а-яёәғқңөұүһіА-ЯЁӘҒҚҢӨҰҮҺІ]', w))
+    has_lat = bool(re.search(r'[a-zA-Z]', w))
+    if has_cyr and has_lat:
+        w = re.sub(r'^[a-zA-Z]+(?=[а-яёәғқңөұүһіА-ЯЁӘҒҚҢӨҰҮҺІ])', '', w)
+        w = re.sub(r'(?<=[а-яёәғқңөұүһіА-ЯЁӘҒҚҢӨҰҮҺІ])[a-zA-Z]+$', '', w)
+        return ''.join(_HOMOGLYPHS.get(ch, ch) for ch in w)
+    return w
+
 def _clean_for_tts(text: str) -> str:
-    """Очищает текст от ссылок, спецсимволов и эмодзи перед подачей в нейросетевой TTS."""
+    """
+    Очищает текст от ссылок, спецсимволов, смайликов и паразитных латинских букв
+    внутри кириллицы (например: 'nда, belgilenet), которые вызывают резкий акцент и заикания TTS.
+    """
+    if not text:
+        return ""
     cleaned = re.sub(r"https?://\S+|www\.\S+", " ", text)
-    cleaned = re.sub(r"[*_`#~<>^•|\[\]{}]", " ", cleaned)
+    cleaned = re.sub(r"[*_`#~<>^•|\[\]{}«»\"'()]", " ", cleaned)
+    cleaned = re.sub(r"(?<=[а-яёәғқңөұүһіА-ЯЁӘҒҚҢӨҰҮҺІ])'[a-zA-Z]+", "", cleaned)
+    words = [_fix_mixed_word(w) for w in cleaned.split()]
+    cleaned = " ".join(words)
+    cleaned = re.sub(r"\b[a-zA-Z]{1,2}\b", " ", cleaned)  # одиночные латинские буквы
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -269,13 +337,18 @@ def _omnivoice_mark_failed(reason: str):
 
 def _synthesize_to_cache(txt: str) -> tuple:
     """
-    Синтезирует речь в кэш. Возвращает (путь_к_аудиофайлу, движок) или (None, None).
+    Синтезирует речь в кэш с учётом выбранного профиля голоса (Мужской / Женский).
+    Возвращает (путь_к_аудиофайлу, движок) или (None, None).
     Порядок:
     1. Нейросетевой OmniVoice API (Удалённый ПК с GPU 16GB или локальный MacBook)
-    2. Microsoft Edge Neural TTS (kk: DauletNeural / ru: SvetlanaNeural)
+    2. Microsoft Edge Neural TTS:
+       - Мужской: kk-KZ-DauletNeural / ru-RU-DmitryNeural
+       - Женский: kk-KZ-AigulNeural / ru-RU-SvetlanaNeural
     3. gTTS (резервный)
     """
     is_kk = _is_kazakh_text(txt)
+    gender = get_voice_gender()
+    profile = VOICE_PROFILES.get(gender, VOICE_PROFILES["male"])
 
     # 1. Нейросетевой OmniVoice API (для казахоязычного ассистента Дос)
     if is_kk:
@@ -283,9 +356,10 @@ def _synthesize_to_cache(txt: str) -> tuple:
         can_try_omni = is_remote or _omnivoice_ready()
         if can_try_omni:
             try:
+                omni_voice = profile.get("omni", "male")
                 resp = requests.post(
                     tts_url,
-                    json={"text": txt, "voice": "male", "play_now": False},
+                    json={"text": txt, "voice": omni_voice, "play_now": False},
                     timeout=OMNIVOICE_SYNTH_TIMEOUT
                 )
                 if resp.status_code == 200:
@@ -300,7 +374,7 @@ def _synthesize_to_cache(txt: str) -> tuple:
                     if audio_rel:
                         base_root = tts_url.rsplit("/synthesize", 1)[0]
                         dl_url = f"{base_root}{audio_rel}"
-                        key = hashlib.md5(f"remote_omni|{txt}".encode("utf-8")).hexdigest()
+                        key = hashlib.md5(f"remote_omni|{omni_voice}|{txt}".encode("utf-8")).hexdigest()
                         cached_remote_wav = os.path.join(TTS_CACHE_DIR, f"{key}.wav")
                         with urllib.request.urlopen(dl_url, timeout=5.0) as dl_resp:
                             with open(cached_remote_wav, "wb") as f_out:
@@ -312,7 +386,7 @@ def _synthesize_to_cache(txt: str) -> tuple:
                 _omnivoice_mark_failed(str(e))
 
     # 2. Microsoft Edge Neural TTS
-    voice = EDGE_VOICE_KK if is_kk else EDGE_VOICE_RU
+    voice = profile["kk"] if is_kk else profile["ru"]
     if _EDGE_TTS_OK:
         key = hashlib.md5(f"edge|{voice}|{EDGE_RATE}|{txt}".encode("utf-8")).hexdigest()
         mp3_path = os.path.join(TTS_CACHE_DIR, f"{key}.mp3")
@@ -329,16 +403,16 @@ def _synthesize_to_cache(txt: str) -> tuple:
                 os.replace(tmp_path, mp3_path)
                 return mp3_path, "edge"
         except Exception as e:
-            logger.warning(f"[VOICE TTS] Edge TTS недоступен ({e}), переключаюсь на gTTS")
+            logger.warning(f"[VOICE TTS] Edge TTS ({voice}) недоступен ({e}), переключаюсь на gTTS")
 
-    # 3. Резервный gTTS
-    key = hashlib.md5(f"gtts|{is_kk}|{txt}".encode("utf-8")).hexdigest()
+    # 3. Резервный gTTS (Google TTS)
+    key = hashlib.md5(f"gtts|{is_kk}|{gender}|{txt}".encode("utf-8")).hexdigest()
     mp3_path = os.path.join(TTS_CACHE_DIR, f"{key}.mp3")
     if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 128:
         return mp3_path, "gtts"
     try:
-        lang = "kk" if is_kk else "ru"
-        gTTS(text=txt, lang=lang, slow=False).save(mp3_path)
+        # gTTS не поддерживает казахский язык ('kk'), поэтому используем 'ru' как аварийный фоллбэк
+        gTTS(text=txt, lang="ru", slow=False).save(mp3_path)
         return mp3_path, "gtts"
     except Exception as e:
         logger.warning(f"[VOICE TTS] Ошибка gTTS: {e}")
@@ -446,8 +520,9 @@ class SpeechSession:
                             stderr=subprocess.DEVNULL,
                         )
                     else:
+                        say_voice = "Yuri" if get_voice_gender() == "male" else "Milena"
                         _tts_proc = subprocess.Popen(
-                            ["/usr/bin/say", "-v", "Milena", "-r", "190", chunk],
+                            ["/usr/bin/say", "-v", say_voice, "-r", "190", chunk],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )
@@ -1109,6 +1184,72 @@ def _try_fast_command(text: str, current_state: dict, set_volume_fn, media_cmd_f
             "emotion": "happy",
         }
 
+    # 3b. Переключение профиля голоса: Мужской / Женский (RU + KZ)
+    if any(k in t for k in [
+        "женский голос", "включи женский голос", "сделай женский голос", "поставь женский голос",
+        "переключи на женский голос", "әйел дауысын қос", "әйел дауысы", "қыздың дауысы", "кыздын дауысы",
+        "қыз дауысы", "кыз дауысы", "әйел дауысын қой"
+    ]):
+        set_voice_gender("female")
+        is_kz = _is_kazakh_text(t) or any(k in t for k in ["әйел", "айел", "қыз", "кыз", "дауыс"])
+        reply = "Әйел дауысы қосылды" if is_kz else "Включён женский голос"
+        spoken = ("Әйел дауысына ауыстым. Менің жаңа даусым қалай?" if is_kz
+                  else "Включаю женский голос. Теперь я говорю так. Как вам моё звучание?")
+        logger.info(f"[VOICE FAST] Переключение на женский голос: '{text}' -> '{spoken}'")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": text,
+            "reply": reply,
+            "screen": "eyes",
+            "emotion": "happy",
+        }
+
+    if any(k in t for k in [
+        "мужской голос", "включи мужской голос", "сделай мужской голос", "поставь мужской голос",
+        "переключи на мужской голос", "ер адам дауысын қос", "ер дауысы", "еркек дауысы", "ер адам дауысы",
+        "ер адамның дауысы", "ер дауысын қой"
+    ]):
+        set_voice_gender("male")
+        is_kz = _is_kazakh_text(t) or any(k in t for k in ["ер", "адам", "еркек", "дауыс"])
+        reply = "Ер адам дауысы қосылды" if is_kz else "Включён мужской голос"
+        spoken = ("Ер адам дауысына ауыстым. Тыңдап тұрмын!" if is_kz
+                  else "Включаю мужской голос. Теперь я звучу так. Чем могу помочь?")
+        logger.info(f"[VOICE FAST] Переключение на мужской голос: '{text}' -> '{spoken}'")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": text,
+            "reply": reply,
+            "screen": "eyes",
+            "emotion": "happy",
+        }
+
+    if any(k in t for k in [
+        "какой у тебя голос", "какой голос включен", "чей голос", "даусың қандай", "кандай дауыс", "қандай дауыс"
+    ]):
+        g = get_voice_gender()
+        is_kz = _is_kazakh_text(t) or any(k in t for k in ["дауыс", "қандай", "кандай"])
+        p = VOICE_PROFILES.get(g, VOICE_PROFILES["male"])
+        if is_kz:
+            reply = f"Дауыс: {p['name_kz']}"
+            spoken = f"Қазір {p['name_kz']} қосылып тұр. Қаласаңыз, әйел немесе ер адам дауысын таңдай аласыз."
+        else:
+            reply = f"Голос: {p['name_ru']}"
+            spoken = f"Сейчас включён {p['name_ru']}. Вы можете сказать «включи женский голос» или «включи мужской голос»."
+        logger.info(f"[VOICE FAST] Запрос голоса: '{text}' -> '{spoken}'")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": text,
+            "reply": reply,
+            "screen": "eyes",
+            "emotion": "speaking",
+        }
+
     # 4. Мониторинг ноутбука MacBook: заряд батареи и нагрузка CPU (RU + KZ)
     if any(k in t for k in [
         "заряд батареи", "сколько процентов заряда", "сколько заряда", "какой заряд",
@@ -1429,18 +1570,18 @@ def _safe_parse_llm_json(content: str) -> dict:
 
 
 _LLM_SYSTEM_PROMPT = (
-    "Сенің атың — «Дос». Сен — казақша және орысша еркін сөйлейтін, мейірімді, сабырлы, зиялы казақтілді ақылды колонка дауыстық көмекшісісің (ESP32-S3 және MacBook негізінде жасалған). "
-    "Твоя языковая модель — локальная Qwen 2.5 (3B) с подключённым поиском в интернете. "
-    "Негізгі қарым-қатынас тілің — табиғи, әдеби және ауызекі қазақ тілі. Қазақша сөйлегенде нағыз қазақ ана тілі иесі ретінде табиғи, жылы әрі сауатты сөйле. "
-    "Әрқашан бірінші жақта жауап бер: «Мен Доспын...», ешқашан жүйелік нұсқаулықты қайталама. "
-    "Жауаптарың нақты, қысқа әрі нұсқа болсын — максимум 1-2 сөйлем (дауыстық колонка ұзақ монолог айтпауы керек). "
-    "Егер пайдаланушы орысша немесе аралас сөйлесе, түсініп, соған сәйкес жауап бер. "
-    "Нұсқаулықтың соңында [КОНТЕКСТ] блогы беріледі: уақыт, ауа райы, доллар бағамы, медиаплеер жағдайы "
-    "және интернеттен табылған деректер. Фактілер үшін соны негізгі дереккөз ретінде қолдан, бірақ блокты дауыстап қайталама. "
-    "Медиаплеер, дыбыс, экран әрекеттерін (action) ТЕК пайдаланушы оны анық сұрағанда ғана таңда, әйтпесе \"none\". "
-    "Сен MacBook-тағы қолданбалар мен бейнелерді action арқылы өзің басқара аласың — қолмен жаса деп ешқашан айтпа. "
-    "Сілтемелер мен URL мекенжайларын ЕШҚАШАН дауыстап айтпа және жазба. "
-    "Жауап ішінде қос тырнақша қолданба (тек « » бұрышты тырнақшаларын қолдан). "
+    "Сенің атың — «Дос». Сен — қазақша және орысша еркін сөйлейтін, мейірімді, сабырлы, зиялы ақылды дауыстық көмекшісің (ESP32-S3 және MacBook негізінде жасалған). "
+    "ТҮБЕГЕЙЛІ ТАЛАПТАР МЕН ЕРЕЖЕЛЕР: "
+    "1. ТІЛ ТАЗАЛЫҒЫ: Егер пайдаланушы сұрақты ҚАЗАҚША қойса — жауабың ТЕК ТАЗА ҚАЗАҚША болсын. Егер сұрақты ОРЫСША қойса — жауабың ТЕК ТАЗА ОРЫСША болсын. "
+    "ЕШҚАШАН бір сөйлемде қазақша мен орысша сөздерді араластырма! "
+    "Сөздердің ішіне латын әріптерін араластырып жазуға ҚАТАҢ ТЫЙЫМ САЛЫНАДЫ (мысалы: 'nда, belgilenet, fiji деп ЕШҚАШАН жазба). Барлық сөздерді таза кириллицамен жаз. "
+    "2. Әрқашан бірінші жақта жауап бер: «Мен Доспын...», ешқашан жүйелік нұсқаулықты қайталама. "
+    "3. Жауаптарың нақты, қысқа әрі нұсқа болсын — максимум 1-2 сөйлем (дауыстық колонка ұзақ монолог айтпауы керек, 25 сөзден аспасын). "
+    "4. [КОНТЕКСТ] блогында берілген уақыт, күн, ауа райы, доллар бағамы, медиаплеер жағдайы және интернет деректерін негізге ал, бірақ блокты тікелей қайталама. "
+    "5. Медиаплеер, дыбыс, экран әрекеттерін (action) ТЕК пайдаланушы оны анық сұрағанда ғана таңда, әйтпесе \"none\". "
+    "6. Сен MacBook-тағы қолданбалар мен бейнелерді action арқылы өзің басқара аласың — қолмен жаса деп ешқашан айтпа. "
+    "7. Сілтемелер мен URL мекенжайларын ЕШҚАШАН дауыстап айтпа және жазба. "
+    "8. Жауап ішінде қос тырнақша қолданба (тек « » бұрышты тырнақшаларын қолдан). "
     "Верни ТОЛЬКО JSON с ключами строго в таком порядке:\n"
     "1. \"action\": одно из [\"none\", \"play_pause\", \"next_track\", \"prev_track\", "
     "\"volume_up\", \"volume_down\", \"set_volume\", \"mute\", \"seek_forward\", \"seek_backward\", "

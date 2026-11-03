@@ -25,7 +25,15 @@ from audio_processor import (
     sanitize_equalizer_bands,
     DEFAULT_BAND_COUNT,
 )
-from voice_assistant import recognize_pcm16, process_voice_command, is_tts_speaking_or_tail, set_event_broadcaster
+from voice_assistant import (
+    recognize_pcm16,
+    process_voice_command,
+    is_tts_speaking_or_tail,
+    set_event_broadcaster,
+    get_voice_gender,
+    set_voice_gender,
+    VOICE_PROFILES,
+)
 
 # ============================================================================
 # Конфигурация сервиса
@@ -781,6 +789,32 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        elif self.path == "/api/voice_config":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8")) if body else {}
+                req_gender = data.get("gender") or data.get("voice_gender") or ""
+                if req_gender:
+                    active = set_voice_gender(req_gender)
+                else:
+                    active = get_voice_gender()
+                res = {
+                    "status": "ok",
+                    "voice_gender": active,
+                    "profile": VOICE_PROFILES.get(active),
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+                return
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                return
+
         self.send_response(404)
         self.end_headers()
 
@@ -797,12 +831,28 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(cmds).encode("utf-8"))
             return
 
+        if self.path == "/api/voice_config":
+            gender = get_voice_gender()
+            res = {
+                "voice_gender": gender,
+                "current_profile": VOICE_PROFILES.get(gender),
+                "profiles": VOICE_PROFILES,
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+            return
+
         if self.path == "/api/status":
             with state_lock:
                 st = dict(current_state)
                 st["equalizer"] = dict(current_eq_state)
             if audio_service is not None:
                 st["audio_capture"] = audio_service.get_snapshot()
+            st["voice_gender"] = get_voice_gender()
+            st["voice_profile"] = VOICE_PROFILES.get(get_voice_gender(), {})
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

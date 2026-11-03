@@ -1,12 +1,12 @@
 {
   "_comment": "Настройки удалённого AI-сервера (ПК с GPU 16GB). Если remote_ai_host пуст, всё работает локально на MacBook.",
-  "remote_ai_host": "",
+  "voice_gender": "male",
+  "remote_ai_host": "192.168.0.106",
   "remote_ollama_port": 11434,
-  "remote_ollama_model": "qwen2.5:3b",
+  "remote_ollama_model": "qwen2.5:7b",
   "remote_tts_port": 8001,
   "fallback_local_ollama": true,
   "local_ollama_url": "http://127.0.0.1:11434/api/chat",
   "local_ollama_model": "qwen2.5:3b",
   "remote_check_timeout_sec": 0.8
 }
-
