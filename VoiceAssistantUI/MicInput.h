@@ -340,7 +340,7 @@ public:
       forceRecordTrigger(false),
       lastVoiceDetectedMs(0),
       cooldownUntilMs(0),
-      serialLogEnabled(true),
+      serialLogEnabled(false),
       lastSerialPrintMs(0) {
     memset(dmaRawBuffer, 0, sizeof(dmaRawBuffer));
     memset(pcmRingBuffer, 0, sizeof(pcmRingBuffer));
