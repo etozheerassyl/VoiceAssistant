@@ -33,6 +33,7 @@ from voice_assistant import (
     get_voice_gender,
     set_voice_gender,
     VOICE_PROFILES,
+    get_llm_status,
 )
 
 # ============================================================================
@@ -179,8 +180,9 @@ def fetch_live_weather_and_rates():
     usd_kzt = None
 
     # 1. Open-Meteo (Алматы: 43.2389, 76.8897)
+    tomorrow_forecast = None
     try:
-        w_url = "https://api.open-meteo.com/v1/forecast?latitude=43.2389&longitude=76.8897&current_weather=true"
+        w_url = "https://api.open-meteo.com/v1/forecast?latitude=43.2389&longitude=76.8897&current_weather=true&daily=weathercode,temperature_2m_max,temperature_2m_min&timezone=auto"
         req = urllib.request.Request(w_url, headers={"User-Agent": "ESP32VoiceAssistant/2.5"})
         with urllib.request.urlopen(req, timeout=3.5) as resp:
             w_data = json.loads(resp.read().decode("utf-8"))
@@ -189,6 +191,19 @@ def fetch_live_weather_and_rates():
                 temp_c = int(round(float(cw["temperature"])))
                 w_code = int(cw.get("weathercode", 0))
                 desc_kz, desc_ru = _decode_wmo_weather(w_code)
+            daily = w_data.get("daily", {})
+            times = daily.get("time", [])
+            if len(times) > 1:
+                t_max = int(round(float(daily["temperature_2m_max"][1])))
+                t_min = int(round(float(daily["temperature_2m_min"][1])))
+                t_code = int(daily["weathercode"][1])
+                t_kz, t_ru = _decode_wmo_weather(t_code)
+                tomorrow_forecast = {
+                    "max": t_max,
+                    "min": t_min,
+                    "desc_kz": t_kz,
+                    "desc_ru": t_ru,
+                }
     except Exception as e:
         logger.debug(f"[WEATHER] Не удалось обновить погоду Open-Meteo: {e}")
 
@@ -230,6 +245,9 @@ def fetch_live_weather_and_rates():
             changed = True
         if usd_kzt is not None and w_obj.get("usd_kzt") != usd_kzt:
             w_obj["usd_kzt"] = usd_kzt
+            changed = True
+        if tomorrow_forecast is not None and w_obj.get("tomorrow") != tomorrow_forecast:
+            w_obj["tomorrow"] = tomorrow_forecast
             changed = True
         if w_obj.get("mac_battery") != batt_pct or w_obj.get("mac_charging") != batt_chg:
             w_obj["mac_battery"] = batt_pct
@@ -853,6 +871,7 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                 st["audio_capture"] = audio_service.get_snapshot()
             st["voice_gender"] = get_voice_gender()
             st["voice_profile"] = VOICE_PROFILES.get(get_voice_gender(), {})
+            st["llm_info"] = get_llm_status()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

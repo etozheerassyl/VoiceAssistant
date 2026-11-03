@@ -29,3 +29,9 @@ MacMediaService/*.log
 /var/folders/
 esp32_tts_cache/
 kazakh_tts_cache/
+
+# Local secrets and configs
+MacMediaService/ai_config.local.json
+MacMediaService/.env
+.env
+

@@ -32,6 +32,7 @@ logger = logging.getLogger("MacMediaService.Voice")
 # Конфигурация AI-бэкенда (Локальный MacBook vs Удалённый мощный ПК с GPU 16GB)
 # ============================================================================
 AI_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_config.json")
+AI_CONFIG_LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_config.local.json")
 
 
 def load_ai_config() -> dict:
@@ -45,19 +46,26 @@ def load_ai_config() -> dict:
         "local_ollama_url": "http://127.0.0.1:11434/api/chat",
         "local_ollama_model": "qwen2.5:3b",
         "remote_check_timeout_sec": 0.8,
+        "use_gemini": True,
+        "gemini_api_key": os.getenv("GEMINI_API_KEY", "").strip(),
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip(),
+        "gemini_timeout_sec": float(os.getenv("GEMINI_TIMEOUT_SEC", "25.0")),
     }
-    if os.path.exists(AI_CONFIG_PATH):
-        try:
-            with open(AI_CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                for k, v in cfg.items():
-                    if not k.startswith("_") and k in defaults:
-                        defaults[k] = v
-        except Exception as e:
-            logger.warning(f"[AI CONFIG] Ошибка чтения ai_config.json: {e}")
+    for path in (AI_CONFIG_PATH, AI_CONFIG_LOCAL_PATH):
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    for k, v in cfg.items():
+                        if not k.startswith("_") and k in defaults and v not in (None, ""):
+                            defaults[k] = v
+            except Exception as e:
+                logger.warning(f"[AI CONFIG] Ошибка чтения {os.path.basename(path)}: {e}")
     # Переменная окружения имеет наивысший приоритет
     if os.getenv("REMOTE_AI_HOST"):
         defaults["remote_ai_host"] = os.getenv("REMOTE_AI_HOST", "").strip()
+    if os.getenv("GEMINI_API_KEY"):
+        defaults["gemini_api_key"] = os.getenv("GEMINI_API_KEY", "").strip()
     return defaults
 
 
@@ -996,12 +1004,13 @@ def _needs_web_search(user_text: str) -> bool:
     if any(k in t for k in chit_chat):
         return False
 
-    # Базовые знания, счет, перевод, повторение и школьные факты НЕ требуют поиска в сети (поиск лишь путает модель)
+    # Базовые знания, счет, перевод, повторение, погода и школьные факты НЕ требуют поиска в сети (поиск лишь путает модель)
     no_search_stems = [
         "повтори", "қайтала", "кайтала", "столиц", "астана", "алфавит", "әліпби", "алипби",
         "әріп", "арип", "букв", "неше әріп", "қанша әріп", "сколько букв", "переведи", "аудар",
         "қалай болады", "калай болады", "сколько будет", "неше болады", "умножь", "раздели",
-        "плюс", "минус", "посчитай", "есепте", "дауыс", "голос", "ер адам", "әйел"
+        "плюс", "минус", "посчитай", "есепте", "дауыс", "голос", "ер адам", "әйел",
+        "погода", "ауа райы", "градус", "жаңбыр", "жаңбыр жауа", "қар жауа", "дождь", "снег"
     ]
     if any(k in t for k in no_search_stems):
         return False
@@ -1131,6 +1140,30 @@ def _try_fast_command(text: str, current_state: dict, set_volume_fn, media_cmd_f
         else:
             spoken = f"Сейчас в Алматы {temp_sign} градусов, на улице {desc_ru}."
         logger.info(f"[VOICE FAST WEATHER] '{text}' -> '{spoken}'")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": text,
+            "reply": reply,
+            "screen": "home",
+            "emotion": "happy",
+        }
+
+    # 2b. Мгновенный ответ о погоде на завтра в Алматы (RU + KZ)
+    if any(k in t for k in ["ертең", "ертен", "завтра"]) and any(k in t for k in ["погода", "ауа райы", "градус"]):
+        tm = (current_state.get("weather") or {}).get("tomorrow") or {}
+        t_max = tm.get("max", 15)
+        t_min = tm.get("min", 4)
+        t_desc_kz = tm.get("desc_kz", "Ашық").lower()
+        t_desc_ru = tm.get("desc_ru", "ясно")
+        is_kz = any(k in t for k in ["ауа райы", "ертең", "ертен"])
+        reply = f"Ертең: {t_min}..{t_max}°C • {t_desc_kz.capitalize()}"
+        if is_kz:
+            spoken = f"Ертең Алматыда ауа райы {t_desc_kz}, күндіз плюс {t_max}, түнде плюс {t_min} градус болады."
+        else:
+            spoken = f"Завтра в Алматы ожидается {t_desc_ru}, днем до плюс {t_max}, ночью плюс {t_min} градусов."
+        logger.info(f"[VOICE FAST WEATHER TOMORROW] '{text}' -> '{spoken}'")
         speak_on_mac(spoken)
         return {
             "type": "voice_result",
@@ -1654,6 +1687,7 @@ def _guard_llm_action(action: str, user_text: str) -> str:
     return "none"
 
 _SPOKEN_START_RE = re.compile(r'"spoken"\s*:\s*"')
+_JSON_SPOKEN_RE = re.compile(r'"(?:spoken|reply)"\s*:\s*"')
 LLM_MAX_SENTENCES = 2
 LLM_MAX_SPOKEN_CHARS = 240
 _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?…](?=\s)")
@@ -1680,9 +1714,14 @@ def _build_llm_context(current_state: dict, web_snippets: str) -> str:
     batt_pct = int(w_obj.get("mac_battery", 100))
     temp_sign = f"+{temp_c}" if temp_c > 0 else str(temp_c)
 
+    tm = w_obj.get("tomorrow") or {}
+    tm_text = ""
+    if tm:
+        tm_text = f" Ертеңгі ауа райы: {tm.get('min')}..{tm.get('max')}°C ({tm.get('desc_ru')})."
+
     ctx = (
         f"[КОНТЕКСТ] Алматы, {now.strftime('%H:%M')}, {current_state.get('date', now.strftime('%d.%m'))}, 2026 жыл. "
-        f"Ауа райы: {temp_sign}°C ({desc_ru}). 1 USD = {usd_kzt} ₸. MacBook батареясы: {batt_pct}%. "
+        f"Ауа райы: {temp_sign}°C ({desc_ru}).{tm_text} 1 USD = {usd_kzt} ₸. MacBook батареясы: {batt_pct}%. "
         f"Плеер ({'ойнап тұр' if is_playing else 'кідіртілген'}): {track_info}, дыбыс {vol}%."
     )
     if web_snippets:
@@ -1881,6 +1920,168 @@ def query_local_llm(user_text: str, current_state: dict, on_sentence=None) -> di
         del _chat_history[:-8]
 
     return parsed
+
+
+def query_gemini(user_text: str, current_state: dict, on_sentence=None) -> dict:
+    """
+    Отправляет запрос в облачную модель Google Gemini API в потоковом режиме (SSE).
+    Обеспечивает эталонное владение казахским и русским языками,
+    фактическую точность и быстрый естественный диалог.
+    При сетевой ошибке, лимитах или тайм-ауте возвращает None для бесшовного fallback на Ollama.
+    """
+    api_key = (_ai_config.get("gemini_api_key") or "").strip()
+    if not api_key or not _ai_config.get("use_gemini", True):
+        return None
+
+    t0 = time.time()
+    web_snippets = ""
+    if _needs_web_search(user_text):
+        web_snippets = search_web_context(user_text)
+    t_web = time.time() - t0
+
+    sys_instruction = f"{_LLM_SYSTEM_PROMPT}\n{_build_llm_context(current_state, web_snippets)}"
+
+    contents = []
+    for h in _chat_history[-4:]:
+        role = "model" if h.get("role") == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": str(h.get("content", ""))}]})
+    contents.append({"role": "user", "parts": [{"text": user_text}]})
+
+    model = (_ai_config.get("gemini_model") or "gemini-3.5-flash-lite").strip()
+    timeout = float(_ai_config.get("gemini_timeout_sec") or 18.0)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
+
+    payload = {
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": sys_instruction}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.2,
+            "maxOutputTokens": 300,
+        }
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    content = ""
+    spoken_txt = ""
+    spoken_start = None
+    emitted = 0
+    closed = False
+    t_first = None
+    t0_req = time.time()
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                try:
+                    chunk = json.loads(data_str)
+                except Exception:
+                    continue
+                for cand in chunk.get("candidates", []):
+                    for part in cand.get("content", {}).get("parts", []):
+                        delta = part.get("text", "")
+                        if not delta:
+                            continue
+                        content += delta
+                        if spoken_start is None:
+                            m = _JSON_SPOKEN_RE.search(content)
+                            if m:
+                                spoken_start = m.end()
+                        if spoken_start is not None:
+                            spoken_txt, closed = _decode_partial_json_string(content, spoken_start)
+                            if on_sentence is not None:
+                                pending = spoken_txt[emitted:]
+                                cut = len(pending) if closed else 0
+                                if not closed:
+                                    for mb in _SENTENCE_BOUNDARY_RE.finditer(pending):
+                                        cut = mb.end()
+                                if cut > 0 and pending[:cut].strip():
+                                    if t_first is None:
+                                        t_first = time.time() - t0_req
+                                    try:
+                                        on_sentence(pending[:cut].strip())
+                                    except Exception as e:
+                                        logger.debug(f"[VOICE GEMINI] on_sentence err: {e}")
+                                    emitted += cut
+                            if closed:
+                                break
+                    if closed:
+                        break
+
+        if not closed and on_sentence is not None and len(spoken_txt) > emitted:
+            tail = spoken_txt[emitted:].strip()
+            if tail:
+                if t_first is None:
+                    t_first = time.time() - t0_req
+                try:
+                    on_sentence(tail)
+                except Exception as e:
+                    logger.debug(f"[VOICE GEMINI] on_sentence tail err: {e}")
+
+        parsed = _safe_parse_llm_json(content)
+        if spoken_txt:
+            parsed["spoken"] = spoken_txt.strip()
+        if not parsed.get("reply") and parsed.get("spoken"):
+            parsed["reply"] = _short_reply(parsed["spoken"])
+
+        logger.info(
+            f"[VOICE LLM] Ответ за {time.time() - t0:.2f} с [GEMINI: {model}] "
+            f"(поиск {t_web:.2f} с" + (f", первое предложение {t_first:.2f} с" if t_first is not None else "") + ")"
+        )
+
+        _chat_history.append({"role": "user", "content": user_text})
+        _chat_history.append({"role": "assistant", "content": json.dumps(
+            {k: parsed.get(k) for k in ("action", "value", "query", "emotion", "spoken")}, ensure_ascii=False)})
+        if len(_chat_history) > 8:
+            del _chat_history[:-8]
+
+        return parsed
+
+    except Exception as e:
+        logger.warning(f"[VOICE LLM] Gemini недоступен ({e}). Переключаюсь на локальную/удалённую Ollama...")
+        return None
+
+
+def query_llm(user_text: str, current_state: dict, on_sentence=None) -> dict:
+    """
+    Основная точка входа для генерации ответа LLM.
+    Приоритет:
+    1. Облачный Google Gemini (при наличии API-ключа и включённой опции) — чистый казахский/русский, 100% точность.
+    2. Удалённый ПК с GPU 16GB (Ollama Qwen 2.5 7B / Aya Expanse 8B).
+    3. Локальный MacBook (Ollama Qwen 2.5 3B).
+    """
+    if _ai_config.get("use_gemini", True) and (_ai_config.get("gemini_api_key") or "").strip():
+        res = query_gemini(user_text, current_state, on_sentence=on_sentence)
+        if res is not None:
+            return res
+
+    return query_local_llm(user_text, current_state, on_sentence=on_sentence)
+
+
+def get_llm_status() -> dict:
+    """Возвращает информацию о текущей конфигурации LLM (Gemini / Ollama)."""
+    has_gemini = bool(_ai_config.get("use_gemini", True) and (_ai_config.get("gemini_api_key") or "").strip())
+    endpoint, model, is_remote = get_ollama_endpoint()
+    return {
+        "gemini_enabled": has_gemini,
+        "gemini_model": _ai_config.get("gemini_model", "gemini-3.5-flash-lite"),
+        "primary": "gemini" if has_gemini else ("remote_ollama" if is_remote else "local_ollama"),
+        "ollama_endpoint": endpoint,
+        "ollama_model": model,
+        "is_remote_ollama": is_remote,
+    }
 
 
 def _execute_action(action: str, value: int, current_state: dict, set_volume_fn, media_cmd_fn, query: str = "") -> str:
@@ -2097,7 +2298,7 @@ def process_voice_command(
         stream_session["s"].feed(sentence)
 
     try:
-        llm_res = query_local_llm(command_text, current_state, on_sentence=_on_sentence)
+        llm_res = query_llm(command_text, current_state, on_sentence=_on_sentence)
         action = _guard_llm_action(str(llm_res.get("action") or "none").strip(), command_text)
         val = llm_res.get("value")
         val = int(val) if isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()) else num_val

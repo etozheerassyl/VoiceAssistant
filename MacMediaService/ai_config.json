@@ -1,5 +1,9 @@
 {
-  "_comment": "Настройки удалённого AI-сервера (ПК с GPU 16GB). Если remote_ai_host пуст, всё работает локально на MacBook.",
+  "_comment": "Настройки AI-сервера и облачной модели Gemini. Ключи можно указывать здесь или в ai_config.local.json.",
+  "use_gemini": true,
+  "gemini_api_key": "",
+  "gemini_model": "gemini-3.5-flash-lite",
+  "gemini_timeout_sec": 25.0,
   "voice_gender": "male",
   "remote_ai_host": "192.168.0.106",
   "remote_ollama_port": 11434,
