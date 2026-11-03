@@ -1,0 +1,2 @@
+#!/bin/zsh
+exec /usr/bin/swift "/Users/yerassyl/DiplomaVoiceAssistant/MacMediaService/media_helper.swift" "$@"

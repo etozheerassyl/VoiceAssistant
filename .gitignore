@@ -1,0 +1,31 @@
+# Virtual environments
+tts_env/
+env/
+venv/
+.venv/
+
+# Large AI model weights (>100MB, downloaded via download_models.py)
+models/
+
+# macOS / OS artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+
+# Compiled native binaries
+MacMediaService/audio_analyzer
+
+# Process PIDs and Runtime logs
+.service.pid
+.tts_service.pid
+MacMediaService/.service.pid
+MacMediaService/.tts_service.pid
+*.log
+MacMediaService/*.log
+
+# Audio cache generated at runtime
+/var/folders/
+esp32_tts_cache/
+kazakh_tts_cache/
