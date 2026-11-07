@@ -25,20 +25,13 @@ if [ ! -f "$DIR/audio_analyzer" ] || [ "$DIR/audio_analyzer.swift" -nt "$DIR/aud
     /usr/bin/swiftc -O "$DIR/audio_analyzer.swift" -o "$DIR/audio_analyzer"
 fi
 
-# 2.5. Запуск локального нейросетевого TTS API Доса (OmniVoice)
-#      На MacBook с ОЗУ < 16 ГБ OmniVoice (612M) не помещается рядом с Ollama qwen2.5:3b:
-#      падает с OutOfMemory и уводит систему в swap (тормозят STT и LLM). Поэтому на таких
-#      машинах он запускается только явно: ENABLE_OMNIVOICE=1 ./start_service.sh
+# 2.5. Запуск локального нейросетевого TTS API Доса (OmniVoice 612M)
 TTS_PID_FILE="$DIR/.tts_service.pid"
 TTS_LOG_FILE="$DIR/tts_service.log"
 TTS_PY="/Users/yerassyl/DiplomaVoiceAssistant/tts_env/bin/python"
-MEM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 
 if [ -f "$TTS_PID_FILE" ] && ps -p "$(cat "$TTS_PID_FILE")" > /dev/null 2>&1; then
     echo "[INFO] Kazakh TTS API (OmniVoice) уже запущен."
-elif [ "$MEM_GB" -lt 16 ] && [ "${ENABLE_OMNIVOICE:-0}" != "1" ]; then
-    echo "[INFO] OmniVoice пропущен (ОЗУ ${MEM_GB} ГБ < 16 ГБ) — казахский голос через Edge TTS (kk-KZ-DauletNeural)."
-    echo "       Принудительно включить: ENABLE_OMNIVOICE=1 ./start_service.sh"
 else
     if [ -f "$TTS_PY" ] && [ -f "$DIR/kazakh_tts_api.py" ]; then
         echo "[START] Запуск Kazakh TTS API (OmniVoice)..."

@@ -295,8 +295,11 @@ void loop() {
           screenAssistant.drawStateCard(tft);
         }
       }
-      if (robotEyes.isVisible() && robotEyes.getEyeState() == EYE_STATE_SPEAKING) {
-        robotEyes.setEyeState(EYE_STATE_IDLE);
+      if (robotEyes.isVisible()) {
+        EyeState curSt = robotEyes.getEyeState();
+        if (curSt == EYE_STATE_SPEAKING || curSt == EYE_STATE_CONFUSED || curSt == EYE_STATE_HAPPY) {
+          robotEyes.setEyeState(EYE_STATE_IDLE);
+        }
       }
     }
 
@@ -328,7 +331,7 @@ void loop() {
           }
         }
         // В режиме сна EYE_STATE_SLEEPY глаза НЕ просыпаются от случайного шума в комнате
-        if (robotEyes.isVisible() && robotEyes.getEyeState() == EYE_STATE_IDLE) {
+        if (robotEyes.isVisible() && robotEyes.getEyeState() != EYE_STATE_SLEEPY && robotEyes.getEyeState() != EYE_STATE_THINKING) {
           robotEyes.setEyeState(EYE_STATE_LISTENING);
         }
       } else if (!vAct && prevVoiceActiveState) {
@@ -546,7 +549,7 @@ void handleNetworkUpdates() {
           speakingHoldUntilMs = millis() + 6500;
         } else if (strcmp(vr.emotion, "confused") == 0) {
           robotEyes.setEyeState(EYE_STATE_CONFUSED);
-          speakingHoldUntilMs = millis() + 6500;
+          speakingHoldUntilMs = millis() + 3000;
         } else {
           robotEyes.setEyeState(EYE_STATE_SPEAKING);
           speakingHoldUntilMs = millis() + 6500;

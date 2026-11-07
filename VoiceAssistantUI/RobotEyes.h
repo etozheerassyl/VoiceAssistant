@@ -491,6 +491,12 @@ private:
       }
     }
 
+    // Переходные эмоциональные реакции (CONFUSED / подозрение и недоумение)
+    // органично длятся ~3.0 секунды, после чего глаза плавно возвращаются в IDLE
+    if (currentState == EYE_STATE_CONFUSED && (now - stateEnteredMs >= 3000)) {
+      setEyeState(EYE_STATE_IDLE);
+    }
+
     // Автоматический сброс ручного взгляда lookAt через тайм-аут удержания
     if (manualGazeActive && now >= manualGazeHoldUntil) {
       manualGazeActive = false;

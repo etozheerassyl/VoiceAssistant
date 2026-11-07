@@ -168,6 +168,12 @@ def synthesize(req: TTSRequest, background_tasks: BackgroundTasks):
     voice_key = req.voice if req.voice in _voice_prompts else "male"
     prompt = _voice_prompts.get(voice_key)
 
+    is_kazakh = any(ch in "әғқңөұүһіӘҒҚҢӨҰҮҺІ" for ch in text) or any(
+        w in text.lower() for w in ["сәлем", "дос", "қалай", "жақсы", "күн", "рахмет", "көмек", "ойнат", "қос", "өшір", "бар", "жоқ", "қанша", "неше", "деген", "кім"]
+    )
+    # Для казахского текста передаём явно 'Kazakh', для остальных языков (русский/английский) None (авто-определение)
+    lang = "Kazakh" if is_kazakh else None
+
     t0 = time.time()
     with _model_lock:
         try:
@@ -179,14 +185,14 @@ def synthesize(req: TTSRequest, background_tasks: BackgroundTasks):
         if prompt is not None:
             audio = _model.generate(
                 text=text,
-                language="Kazakh",
+                language=lang,
                 voice_clone_prompt=prompt,
                 generation_config=gen_cfg
             )
         else:
             audio = _model.generate(
                 text=text,
-                language="Kazakh",
+                language=lang,
                 generation_config=gen_cfg
             )
 

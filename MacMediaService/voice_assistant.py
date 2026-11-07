@@ -111,7 +111,7 @@ EDGE_RATE = "+0%"
 LOCAL_TTS_API_URL = "http://127.0.0.1:8001/synthesize"
 LOCAL_TTS_HEALTH_URL = "http://127.0.0.1:8001/health"
 OMNIVOICE_SYNTH_TIMEOUT = 25.0  # Запас времени на нейросетевую генерацию на GPU (OmniVoice)
-OMNIVOICE_RETRY_SEC = 300       # После сбоя/неготовности OmniVoice не опрашивается 5 минут
+OMNIVOICE_RETRY_SEC = 10         # Быстрое авто-восстановление OmniVoice после перезагрузки модели
 _omnivoice_state = ("unknown", 0.0)  # (статус, timestamp последней проверки)
 
 
@@ -258,7 +258,10 @@ except Exception:
     _EDGE_TTS_OK = False
 
 try:
-    from kazakh_stt import get_stt_engine
+    try:
+        from kazakh_stt import get_stt_engine
+    except ImportError:
+        from MacMediaService.kazakh_stt import get_stt_engine
 except Exception as _e:
     logger.warning(f"Не удалось импортировать локальный STT (kazakh_stt): {_e}")
     get_stt_engine = None
@@ -358,7 +361,7 @@ def _omnivoice_ready() -> bool:
     if status in ("down", "failed") and now - ts < OMNIVOICE_RETRY_SEC:
         return False
     try:
-        r = requests.get(LOCAL_TTS_HEALTH_URL, timeout=0.3)
+        r = requests.get(LOCAL_TTS_HEALTH_URL, timeout=0.6)
         ok = r.status_code == 200 and r.json().get("status") == "ready"
     except Exception:
         ok = False
@@ -387,41 +390,40 @@ def _synthesize_to_cache(txt: str) -> tuple:
     gender = get_voice_gender()
     profile = VOICE_PROFILES.get(gender, VOICE_PROFILES["male"])
 
-    # 1. Нейросетевой OmniVoice API (для казахоязычного ассистента Дос)
-    if is_kk:
-        tts_url, health_url, is_remote = get_tts_endpoint()
-        can_try_omni = is_remote or _omnivoice_ready()
-        if can_try_omni:
-            try:
-                omni_voice = profile.get("omni", "male")
-                resp = requests.post(
-                    tts_url,
-                    json={"text": txt, "voice": omni_voice, "play_now": False},
-                    timeout=OMNIVOICE_SYNTH_TIMEOUT
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Если локальный файл уже доступен (на этой же машине)
-                    local_candidate = data.get("audio_path")
-                    if local_candidate and os.path.exists(local_candidate) and os.path.getsize(local_candidate) > 1024:
-                        return local_candidate, "omnivoice"
+    # 1. Приоритетный нейросетевой OmniVoice API (эталонный голос Доса)
+    tts_url, health_url, is_remote = get_tts_endpoint()
+    can_try_omni = is_remote or _omnivoice_ready()
+    if can_try_omni:
+        try:
+            omni_voice = profile.get("omni", "male")
+            resp = requests.post(
+                tts_url,
+                json={"text": txt, "voice": omni_voice, "play_now": False},
+                timeout=OMNIVOICE_SYNTH_TIMEOUT
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Если локальный файл уже доступен (на этой же машине)
+                local_candidate = data.get("audio_path")
+                if local_candidate and os.path.exists(local_candidate) and os.path.getsize(local_candidate) > 1024:
+                    return local_candidate, "omnivoice"
 
-                    # Если файл сгенерирован на удалённом ПК — скачиваем его через audio_url
-                    audio_rel = data.get("audio_url")
-                    if audio_rel:
-                        base_root = tts_url.rsplit("/synthesize", 1)[0]
-                        dl_url = f"{base_root}{audio_rel}"
-                        key = hashlib.md5(f"remote_omni|{omni_voice}|{txt}".encode("utf-8")).hexdigest()
-                        cached_remote_wav = os.path.join(TTS_CACHE_DIR, f"{key}.wav")
-                        with urllib.request.urlopen(dl_url, timeout=5.0) as dl_resp:
-                            with open(cached_remote_wav, "wb") as f_out:
-                                f_out.write(dl_resp.read())
-                        if os.path.exists(cached_remote_wav) and os.path.getsize(cached_remote_wav) > 1024:
-                            return cached_remote_wav, "omnivoice"
-                else:
-                    _omnivoice_mark_failed(f"HTTP {resp.status_code}")
-            except Exception as e:
-                _omnivoice_mark_failed(str(e))
+                # Если файл сгенерирован на удалённом ПК — скачиваем его через audio_url
+                audio_rel = data.get("audio_url")
+                if audio_rel:
+                    base_root = tts_url.rsplit("/synthesize", 1)[0]
+                    dl_url = f"{base_root}{audio_rel}"
+                    key = hashlib.md5(f"remote_omni|{omni_voice}|{txt}".encode("utf-8")).hexdigest()
+                    cached_remote_wav = os.path.join(TTS_CACHE_DIR, f"{key}.wav")
+                    with urllib.request.urlopen(dl_url, timeout=5.0) as dl_resp:
+                        with open(cached_remote_wav, "wb") as f_out:
+                            f_out.write(dl_resp.read())
+                    if os.path.exists(cached_remote_wav) and os.path.getsize(cached_remote_wav) > 1024:
+                        return cached_remote_wav, "omnivoice"
+            else:
+                _omnivoice_mark_failed(f"HTTP {resp.status_code}")
+        except Exception as e:
+            _omnivoice_mark_failed(str(e))
 
     # 2. Microsoft Edge Neural TTS (Чистый нейросетевой звук без металлического робота)
     primary_voice = profile["kk"] if is_kk else profile["ru"]
