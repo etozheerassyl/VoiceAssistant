@@ -5,7 +5,7 @@
   "gemini_model": "gemini-3.5-flash-lite",
   "gemini_timeout_sec": 25.0,
   "voice_gender": "male",
-  "remote_ai_host": "192.168.0.106",
+  "remote_ai_host": "",
   "remote_ollama_port": 11434,
   "remote_ollama_model": "qwen2.5:7b",
   "remote_tts_port": 8001,

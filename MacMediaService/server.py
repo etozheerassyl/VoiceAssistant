@@ -724,8 +724,9 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
                 return
 
         elif self.path == "/api/text":
-            # Локальная отладка: текстовая команда без микрофона (только с самого MacBook)
-            if self.client_address[0] not in ("127.0.0.1", "::1"):
+            # Разрешаем запросы с локальной машины и локальной подсети (MacBook, ESP32, мобильный браузер)
+            client_ip = self.client_address[0]
+            if not (client_ip.startswith("127.") or client_ip.startswith("192.168.") or client_ip.startswith("10.") or client_ip == "::1"):
                 self.send_response(403)
                 self.end_headers()
                 return
@@ -836,8 +837,171 @@ class BrowserBridgeHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _render_dashboard_html(self):
+        gender = get_voice_gender()
+        male_active = "active" if gender == "male" else ""
+        female_active = "active" if gender == "female" else ""
+        return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Дос — Голосовой Ассистент (ESP32-S3 + Mac)</title>
+    <style>
+        :root {{
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --primary: #38bdf8;
+            --accent: #10b981;
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+            --border: #334155;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+        body {{ background: var(--bg); color: var(--text); padding: 24px 16px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }}
+        .container {{ width: 100%; max-width: 640px; }}
+        header {{ text-align: center; margin-bottom: 24px; }}
+        h1 {{ font-size: 26px; font-weight: 700; color: var(--primary); margin-bottom: 6px; }}
+        .subtitle {{ color: var(--text-dim); font-size: 14px; }}
+        .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 20px; margin-bottom: 20px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); }}
+        .card h2 {{ font-size: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 14px; }}
+        .voice-buttons {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+        .voice-btn {{
+            background: #0f172a; border: 2px solid var(--border); color: var(--text); border-radius: 12px; padding: 14px;
+            font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; display: flex; flex-direction: column; align-items: center; gap: 6px;
+        }}
+        .voice-btn:hover {{ border-color: var(--primary); transform: translateY(-2px); }}
+        .voice-btn.active {{ border-color: var(--primary); background: rgba(56, 189, 248, 0.15); color: var(--primary); }}
+        .voice-desc {{ font-size: 12px; color: var(--text-dim); font-weight: 400; }}
+        .status-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }}
+        .status-pill {{ background: #0f172a; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); }}
+        .status-pill span {{ display: block; font-size: 11px; color: var(--text-dim); text-transform: uppercase; }}
+        .status-pill strong {{ font-size: 14px; color: var(--text); }}
+        .test-input {{ width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 12px; font-size: 14px; resize: none; margin-bottom: 12px; }}
+        .test-input:focus {{ outline: none; border-color: var(--primary); }}
+        .submit-btn {{ width: 100%; background: var(--primary); color: #0f172a; border: none; border-radius: 10px; padding: 12px; font-weight: 700; cursor: pointer; transition: opacity 0.2s; }}
+        .submit-btn:hover {{ opacity: 0.9; }}
+        .chat-output {{ background: #0f172a; border-radius: 10px; padding: 12px; margin-top: 12px; font-size: 13px; line-height: 1.5; min-height: 48px; border: 1px solid var(--border); }}
+        .cheat-item {{ font-size: 13px; color: var(--text-dim); margin-bottom: 6px; padding-left: 8px; border-left: 2px solid var(--primary); }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Дос • Голосовой Ассистент</h1>
+            <p class="subtitle">Қазақша & Русский • ESP32-S3 + MacBook</p>
+        </header>
+
+        <div class="card">
+            <h2>Таңдалған дауыс / Выбор голоса</h2>
+            <div class="voice-buttons">
+                <button class="voice-btn {male_active}" onclick="setVoice('male')">
+                    👨 Мужской / Ер адам
+                    <span class="voice-desc">Дәулет (KK) / Дмитрий (RU)</span>
+                </button>
+                <button class="voice-btn {female_active}" onclick="setVoice('female')">
+                    👩 Женский / Әйел
+                    <span class="voice-desc">Айгүл (KK) / Светлана (RU)</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Тест голосового ответа (Озвучка на Mac)</h2>
+            <textarea id="promptText" class="test-input" rows="2" placeholder="Введите фразу (мысалы: Қазақ әліпбиінде қанша әріп бар?)"></textarea>
+            <button class="submit-btn" onclick="sendPrompt()">▶ Озвучить и отправить Досу</button>
+            <div id="replyBox" class="chat-output" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>Статус системы</h2>
+            <div class="status-grid">
+                <div class="status-pill">
+                    <span>Мозг (LLM)</span>
+                    <strong style="color:var(--accent);">Gemini 3.5 Flash-Lite</strong>
+                </div>
+                <div class="status-pill">
+                    <span>Синтез речи (TTS)</span>
+                    <strong style="color:var(--primary);">Edge Neural TTS</strong>
+                </div>
+                <div class="status-pill">
+                    <span>ESP32-S3 Порт</span>
+                    <strong id="espStatus">TCP :8765</strong>
+                </div>
+                <div class="status-pill">
+                    <span>Текущий голос</span>
+                    <strong id="curVoiceDisplay">{gender.capitalize()}</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Голосовые команды для микрофона</h2>
+            <div class="cheat-item">«Дос, сенің авторың кім?» / «Кто твой создатель?»</div>
+            <div class="cheat-item">«Дос, қосыл» / «Сәлем Дос» (оклик помощника)</div>
+            <div class="cheat-item">«Дос, әйел дауысын қос» / «Включи мужской голос»</div>
+            <div class="cheat-item">«Дос-Мұқасан туралы бір нәрсе айтып берші»</div>
+            <div class="cheat-item">«Дос, қазақ әліпбиінде неше әріп бар?»</div>
+            <div class="cheat-item">«Дос, открой телеграм» / «Ютубтан қазақша ән қос»</div>
+        </div>
+    </div>
+
+    <script>
+        async function setVoice(gender) {{
+            try {{
+                const res = await fetch('/api/voice_config', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{gender: gender}})
+                }});
+                if (res.ok) {{
+                    document.querySelectorAll('.voice-btn').forEach(b => b.classList.remove('active'));
+                    if (gender === 'male') {{
+                        document.querySelectorAll('.voice-btn')[0].classList.add('active');
+                        document.getElementById('curVoiceDisplay').innerText = 'Male (Дәулет)';
+                    }} else {{
+                        document.querySelectorAll('.voice-btn')[1].classList.add('active');
+                        document.getElementById('curVoiceDisplay').innerText = 'Female (Айгүл/Светлана)';
+                    }}
+                }}
+            }} catch(e) {{
+                alert('Ошибка переключения: ' + e);
+            }}
+        }}
+
+        async function sendPrompt() {{
+            const text = document.getElementById('promptText').value.trim();
+            if (!text) return;
+            const box = document.getElementById('replyBox');
+            box.style.display = 'block';
+            box.innerHTML = '<em>Дос ойланып жатыр / Дос думает...</em>';
+            try {{
+                const res = await fetch('/api/text', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{text: text}})
+                }});
+                const data = await res.json();
+                box.innerHTML = '<strong>Дос:</strong> ' + (data.spoken || data.reply || 'Выполнено');
+            }} catch(e) {{
+                box.innerHTML = '<span style="color:#f87171;">Ошибка: ' + e + '</span>';
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+
     def do_GET(self):
         global browser_pending_commands
+        if self.path in ("/", "/index.html"):
+            html_content = self._render_dashboard_html()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(html_content.encode("utf-8"))
+            return
+
         if self.path == "/api/browser_commands":
             with state_lock:
                 cmds = list(browser_pending_commands)

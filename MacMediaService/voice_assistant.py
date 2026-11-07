@@ -233,11 +233,14 @@ def get_tts_endpoint() -> tuple:
 _wake_active_until = 0.0   # Timestamp активного окна диалога после оклика «Дос» (в секундах)
 _wake_lock = threading.Lock()
 
-_WAKE_WORD_RE = re.compile(r"(?i)\b(досжан|досым|досың|досын|доспысың|доспысын|доспын|доссың|доссын|достар|доспен|доске|досик|дос|dos)\b")
+_WAKE_WORD_RE = re.compile(
+    r"(?i)\b(дос+|досым|досың|досын|доспысың|доспысын|доспын|доссың|доссын|достар|доспен|доске|досқа|доска|досик|дося|досжан|dos)\b"
+    r"|^(дос+|досым|досик)(?=[а-яёәғқңөұүһі]{3,})"
+)
 _LEADING_GREETINGS_RE = re.compile(
     r"(?i)^\s*(?:ассалаумағалейкум|ассаламуалейкум|ассалаумалейкум|сәлеметсізбе|сәлеметсіз\s*бе|"
     r"қайырлы\s*күн|сәлем|салем|привет|эй|слушай|тыңда|алло|хеллоу|hello|hey|ок|окей|жарайды)?\s*"
-    r"(?:досжан|досым|досың|досын|доспысың|доспысын|доспын|доссың|доссын|достар|доспен|доске|досик|дос|dos)\s*(?:жан|досым)?\s*[,!?:;-]*\s*"
+    r"(?:дос+|досым|досың|досын|доспысың|доспысын|доспын|доссың|доссын|достар|доспен|доске|досқа|доска|досик|дося|досжан|dos)\s*(?:жан|досым)?\s*[,!?:;-]*\s*"
 )
 
 _KAZAKH_LETTERS = set("әғқңөұүһіӘҒҚҢӨҰҮҺІ")
@@ -301,6 +304,9 @@ def _clean_for_tts(text: str) -> str:
         return ""
     cleaned = re.sub(r"https?://\S+|www\.\S+", " ", text)
     cleaned = re.sub(r"[*_`#~<>^•|\[\]{}«»\"'()]", " ", cleaned)
+    # Нормализация тире и дефисов (дефисы между словами в Edge TTS вызывают сбой NoAudioReceived)
+    cleaned = re.sub(r"\s+[-—–]\s+", ", ", cleaned)
+    cleaned = re.sub(r"[-—–]", " ", cleaned)
     cleaned = re.sub(r"(?<=[а-яёәғқңөұүһіА-ЯЁӘҒҚҢӨҰҮҺІ])'[a-zA-Z]+", "", cleaned)
     words = [_fix_mixed_word(w) for w in cleaned.split()]
     cleaned = " ".join(words)
@@ -417,27 +423,37 @@ def _synthesize_to_cache(txt: str) -> tuple:
             except Exception as e:
                 _omnivoice_mark_failed(str(e))
 
-    # 2. Microsoft Edge Neural TTS
-    voice = profile["kk"] if is_kk else profile["ru"]
+    # 2. Microsoft Edge Neural TTS (Чистый нейросетевой звук без металлического робота)
+    primary_voice = profile["kk"] if is_kk else profile["ru"]
+    # Резервный нейроголос при сбое Azure API (Daulet для мужчин, Svetlana для женщин)
+    fallback_voice = "kk-KZ-DauletNeural" if gender == "male" else "ru-RU-SvetlanaNeural"
+    candidate_voices = [primary_voice]
+    if fallback_voice != primary_voice:
+        candidate_voices.append(fallback_voice)
+
     if _EDGE_TTS_OK:
-        key = hashlib.md5(f"edge|{voice}|{EDGE_RATE}|{txt}".encode("utf-8")).hexdigest()
-        mp3_path = os.path.join(TTS_CACHE_DIR, f"{key}.mp3")
-        if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 512:
-            return mp3_path, "edge"
-        try:
-            tmp_path = mp3_path + ".part"
-
-            async def _run():
-                await edge_tts.Communicate(txt, voice, rate=EDGE_RATE).save(tmp_path)
-
-            asyncio.run(_run())
-            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 512:
-                os.replace(tmp_path, mp3_path)
+        for voice_cand in candidate_voices:
+            # Для ru-RU-DmitryNeural временно заменяем запятые на пробелы, т.к. парсер Azure падает на запятых
+            tts_txt = txt.replace(",", " ") if "Dmitry" in voice_cand else txt
+            key = hashlib.md5(f"edge|{voice_cand}|{EDGE_RATE}|{tts_txt}".encode("utf-8")).hexdigest()
+            mp3_path = os.path.join(TTS_CACHE_DIR, f"{key}.mp3")
+            if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 512:
                 return mp3_path, "edge"
-        except Exception as e:
-            logger.warning(f"[VOICE TTS] Edge TTS ({voice}) недоступен ({e}), переключаюсь на gTTS")
+            try:
+                tmp_path = mp3_path + ".part"
 
-    # 3. Резервный gTTS (Google TTS)
+                async def _run(v_name=voice_cand, t_clean=tts_txt):
+                    await edge_tts.Communicate(t_clean, v_name, rate=EDGE_RATE).save(tmp_path)
+
+                asyncio.run(_run())
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 512:
+                    os.replace(tmp_path, mp3_path)
+                    return mp3_path, "edge"
+            except Exception as e:
+                logger.warning(f"[VOICE TTS] Голос Edge TTS ({voice_cand}) выдал ошибку ({e}), пробую альтернативный...")
+                continue
+
+    # 3. Резервный gTTS (Google TTS) — только если ВСЕ нейросети недоступны
     key = hashlib.md5(f"gtts|{is_kk}|{gender}|{txt}".encode("utf-8")).hexdigest()
     mp3_path = os.path.join(TTS_CACHE_DIR, f"{key}.mp3")
     if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 128:
@@ -1034,7 +1050,8 @@ def _needs_web_search(user_text: str) -> bool:
         "қалай болады", "калай болады", "сколько будет", "неше болады", "умножь", "раздели",
         "плюс", "минус", "посчитай", "есепте", "дауыс", "голос", "ер адам", "әйел",
         "погода", "ауа райы", "градус", "жаңбыр", "жаңбыр жауа", "қар жауа", "дождь", "снег",
-        "создал", "создатель", "автор", "разработчик", "ким жасады", "кім жасады", "жасаушы"
+        "создал", "создатель", "автор", "разработчик", "ким жасады", "кім жасады", "жасаушы",
+        "дос-мұқасан", "досмұқасан", "досмұқұсан", "мұқасан", "мукасан"
     ]
     if any(k in t for k in no_search_stems):
         return False
@@ -1687,17 +1704,16 @@ _LLM_SYSTEM_PROMPT = (
     "8. Сілтемелер мен URL мекенжайларын ЕШҚАШАН дауыстап айтпа және жазба. "
     "9. Жауап ішінде қос тырнақша қолданба (тек « » бұрышты тырнақшаларын қолдан). "
     "Верни ТОЛЬКО JSON с ключами строго в таком порядке:\n"
-    "1. \"action\": одно из [\"none\", \"play_pause\", \"next_track\", \"prev_track\", "
+    "1. \"spoken\": твой точный, содержательный ответ пользователю — 1-2 коротких живых предложения (до 25 слов), без повторов и без самопредставления; этот ключ ОБЯЗАТЕЛЬНО ИДЁТ САМЫМ ПЕРВЫМ!\n"
+    "2. \"action\": одно из [\"none\", \"play_pause\", \"next_track\", \"prev_track\", "
     "\"volume_up\", \"volume_down\", \"set_volume\", \"mute\", \"seek_forward\", \"seek_backward\", "
     "\"screen_home\", \"screen_music\", \"screen_video\", \"screen_assistant\", \"screen_eyes\", "
     "\"sleep_eyes\", \"hide_eyes\", \"open_app\", \"youtube_search\", \"open_music_app\", \"screenshot\", \"brightness_up\", \"brightness_down\"]. "
     "open_app — открыть приложение (название в query), youtube_search — найти и включить видео на YouTube (что искать — в query). "
     "Для обычных вопросов и бесед выбирай \"none\".\n"
-    "2. \"value\": число (проценты громкости 0..100 или секунды перемотки, иначе 0).\n"
-    "3. \"query\": название приложения или поисковый запрос для YouTube (иначе пустая строка).\n"
-    "4. \"emotion\": \"happy\", \"speaking\", \"thinking\", \"confused\" или \"sleepy\".\n"
-    "5. \"spoken\": твой точный, содержательный ответ пользователю — 1-2 коротких предложения (до 25 слов), без повторов; он будет озвучен вслух. "
-    "Ключ spoken всегда ПОСЛЕДНИЙ."
+    "3. \"value\": число (проценты громкости 0..100 или секунды перемотки, иначе 0).\n"
+    "4. \"query\": название приложения или поисковый запрос для YouTube (иначе пустая строка).\n"
+    "5. \"emotion\": \"happy\", \"speaking\", \"thinking\", \"confused\" или \"sleepy\"."
 )
 
 # Ключевые основы слов, без которых аппаратное действие от LLM считается галлюцинацией модели 3B
@@ -2228,6 +2244,11 @@ def process_voice_command(
     global _wake_active_until
 
     raw_text = (text or "").strip()
+
+    # Нормализация ансамбля Дос-Мұқасан (чтобы имя коллектива не срезалось как обращение)
+    if re.search(r"(?i)\bдосм[ұу]қ[аыұу]сан", raw_text):
+        raw_text = re.sub(r"(?i)\bдосм[ұу]қ[аыұу]сан", "Дос-Мұқасан", raw_text)
+
     now = time.time()
     with _wake_lock:
         is_session_active = (now < _wake_active_until)
@@ -2284,18 +2305,36 @@ def process_voice_command(
             "emotion": "sleepy",
         }
 
+    if any(k in t_lower for k in ["рахмет", "рақмет", "спасибо"]):
+        with _wake_lock:
+            _wake_active_until = 0.0
+        is_kk = _is_kazakh_text(raw_text)
+        spoken = "Оқасы жоқ! Көмектескеніме қуаныштымын." if is_kk else "Пожалуйста! Рад был помочь."
+        reply = "Оқасы жоқ • Пожалуйста"
+        logger.info(f"[VOICE WAKE] Завершение диалога благодарностью: «{raw_text}»")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": raw_text,
+            "reply": reply,
+            "screen": "eyes",
+            "emotion": "happy",
+        }
+
     # Очищаем команду от обращения к Досу в начале или конце фразы
     effective_text = raw_text
     if has_wake_word:
-        effective_text = _LEADING_GREETINGS_RE.sub("", effective_text).strip()
-        if _WAKE_WORD_RE.search(effective_text):
-            effective_text = _WAKE_WORD_RE.sub("", effective_text).strip(" ,!?:;-")
+        if not re.search(r"(?i)^дос[\s\-]*м[ұу]қ[аыұу]сан", effective_text):
+            effective_text = _LEADING_GREETINGS_RE.sub("", effective_text).strip()
+            if _WAKE_WORD_RE.search(effective_text) and not re.search(r"(?i)^дос[\s\-]*м[ұу]қ[аыұу]сан", effective_text):
+                effective_text = _WAKE_WORD_RE.sub("", effective_text).strip(" ,!?:;-")
 
     # Если пользователь ТОЛЬКО позвал помощника по имени («Дос», «Сәлем Дос», «Досым»):
     if has_wake_word and (not effective_text or len(effective_text) <= 1):
         with _wake_lock:
-            # Окно ожидания команды активно 7 секунд
-            _wake_active_until = time.time() + 7.0
+            # Окно ожидания команды активно 10 секунд
+            _wake_active_until = time.time() + 10.0
 
         is_kk = _is_kazakh_text(raw_text) or any(k in t_lower for k in ["сәлем", "салем", "досым", "дос"])
         if is_kk:
@@ -2305,7 +2344,7 @@ def process_voice_command(
             spoken = "Да, я слушаю!"
             reply = "Слушаю вас..."
 
-        logger.info(f"[VOICE WAKE] Оклик помощника: «{raw_text}» -> Окно ожидания команды активно (7 сек)")
+        logger.info(f"[VOICE WAKE] Оклик помощника: «{raw_text}» -> Окно ожидания команды активно (10 сек)")
         speak_on_mac(spoken)
         return {
             "type": "voice_result",
@@ -2316,9 +2355,9 @@ def process_voice_command(
             "emotion": "speaking",
         }
 
-    # Если была конкретная команда, закрываем окно диалога после её выполнения
+    # Продлеваем окно активного диалога на 12 секунд для естественного продолжения разговора!
     with _wake_lock:
-        _wake_active_until = 0.0
+        _wake_active_until = time.time() + 12.0
 
     command_text = effective_text if effective_text else raw_text
 
@@ -2409,6 +2448,10 @@ def process_voice_command(
         stream_session["s"].finish()  # Ответ уже озвучивается по предложениям
     else:
         speak_on_mac(spoken)
+
+    # Продлеваем окно активного диалога на 12 секунд после озвучивания ответа
+    with _wake_lock:
+        _wake_active_until = time.time() + 12.0
 
     return {
         "type": "voice_result",
