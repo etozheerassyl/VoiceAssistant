@@ -309,6 +309,29 @@ def _clean_for_tts(text: str) -> str:
     return cleaned
 
 
+def _strip_name_intro(text: str, user_query: str = "") -> str:
+    """
+    Удаляет паразитное вводное представление («Мен Доспын, », «Я Дос, ») из начала ответа,
+    если только пользователь прямо не спросил «сен кімсің» или «кто ты».
+    """
+    if not text:
+        return ""
+    q = (user_query or "").lower()
+    if any(k in q for k in ["кто ты", "как тебя зовут", "как твое имя", "сен кімсің", "сен кимсин", "атың кім", "атын ким", "есімің кім"]):
+        return text
+
+    cleaned = re.sub(
+        r"^(?:мен\s+доспын[,\.\—\-:\s]*|мен\s+дос[,\.\—\-:\s]*|я\s+дос[,\.\—\-:\s]*|меня\s+зовут\s+дос[,\.\—\-:\s]*|менің\s+атым\s+дос[,\.\—\-:\s]*)",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if cleaned:
+        return cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+    return ""
+
+
 def _is_kazakh_text(text: str) -> bool:
     if any(ch in _KAZAKH_LETTERS for ch in text):
         return True
@@ -1010,7 +1033,8 @@ def _needs_web_search(user_text: str) -> bool:
         "әріп", "арип", "букв", "неше әріп", "қанша әріп", "сколько букв", "переведи", "аудар",
         "қалай болады", "калай болады", "сколько будет", "неше болады", "умножь", "раздели",
         "плюс", "минус", "посчитай", "есепте", "дауыс", "голос", "ер адам", "әйел",
-        "погода", "ауа райы", "градус", "жаңбыр", "жаңбыр жауа", "қар жауа", "дождь", "снег"
+        "погода", "ауа райы", "градус", "жаңбыр", "жаңбыр жауа", "қар жауа", "дождь", "снег",
+        "создал", "создатель", "автор", "разработчик", "ким жасады", "кім жасады", "жасаушы"
     ]
     if any(k in t for k in no_search_stems):
         return False
@@ -1235,7 +1259,35 @@ def _try_fast_command(text: str, current_state: dict, set_volume_fn, media_cmd_f
             "emotion": "happy",
         }
 
-    # 3b. Переключение профиля голоса: Мужской / Женский (RU + KZ)
+    # 3b. Пасхалка о создателе / авторе: Сабитов Ерасыл (RU + KZ)
+    if any(k in t for k in [
+        "кто создал тебя", "кто тебя создал", "кто твой создатель", "кто твой автор",
+        "кто твой разработчик", "кто твой папа", "кто тебя придумал", "кто тебя разработал",
+        "кто тебя сделал", "кто сделал тебя", "чей ты проект",
+        "сені кім жасады", "сені кім жаратты", "сені кім ойлап тапты", "сенің авторың кім",
+        "сенің жасаушың кім", "сені кім құрастырды", "сени ким жасады", "сени ким жаратты",
+        "сени ким курастырды", "сенин авторын ким", "сенин жасаушын ким"
+    ]):
+        is_kz = _is_kazakh_text(t) or any(k in t for k in ["сені", "сени", "жасады", "жаратты", "авторың", "авторын", "жасаушың", "жасаушын", "құрастырды", "курастырды"])
+        if is_kz:
+            reply = "Сабитов Ерасыл — данышпан..."
+            spoken = "Менің жасаушым данышпан, миллиардер, плейбой, филантроп — Сабитов Ерасыл."
+        else:
+            reply = "Мой создатель — Сабитов Ерасыл"
+            spoken = "Мой создатель гений, миллиардер, плейбой, филантроп — Сабитов Ерасыл."
+
+        logger.info(f"[VOICE CREATOR EASTER EGG] '{text}' -> '{spoken}'")
+        speak_on_mac(spoken)
+        return {
+            "type": "voice_result",
+            "status": "ok",
+            "heard": text,
+            "reply": reply,
+            "screen": "eyes",
+            "emotion": "happy",
+        }
+
+    # 3c. Переключение профиля голоса: Мужской / Женский (RU + KZ)
     if any(k in t for k in [
         "женский голос", "включи женский голос", "сделай женский голос", "поставь женский голос",
         "переключи на женский голос", "әйел дауысын қос", "әйел дауысы", "қыздың дауысы", "кыздын дауысы",
@@ -1626,13 +1678,14 @@ _LLM_SYSTEM_PROMPT = (
     "1. ТІЛ ТАЗАЛЫҒЫ: Егер пайдаланушы сұрақты ҚАЗАҚША қойса — жауабың ТЕК ТАЗА ҚАЗАҚША болсын. Егер сұрақты ОРЫСША қойса — жауабың ТЕК ТАЗА ОРЫСША болсын. "
     "ЕШҚАШАН бір сөйлемде қазақша мен орысша сөздерді араластырма! "
     "Сөздердің ішіне латын әріптерін араластырып жазуға ҚАТАҢ ТЫЙЫМ САЛЫНАДЫ (мысалы: 'nда, belgilenet, fiji деп ЕШҚАШАН жазба). Барлық сөздерді таза кириллицамен жаз. "
-    "2. Әрқашан бірінші жақта жауап бер: «Мен Доспын...», ешқашан жүйелік нұсқаулықты қайталама. "
-    "3. Жауаптарың нақты, қысқа әрі нұсқа болсын — максимум 1-2 сөйлем (дауыстық колонка ұзақ монолог айтпауы керек, 25 сөзден аспасын). "
-    "4. [КОНТЕКСТ] блогында берілген уақыт, күн, ауа райы, доллар бағамы, медиаплеер жағдайы және интернет деректерін негізге ал, бірақ блокты тікелей қайталама. "
-    "5. Медиаплеер, дыбыс, экран әрекеттерін (action) ТЕК пайдаланушы оны анық сұрағанда ғана таңда, әйтпесе \"none\". "
-    "6. Сен MacBook-тағы қолданбалар мен бейнелерді action арқылы өзің басқара аласың — қолмен жаса деп ешқашан айтпа. "
-    "7. Сілтемелер мен URL мекенжайларын ЕШҚАШАН дауыстап айтпа және жазба. "
-    "8. Жауап ішінде қос тырнақша қолданба (тек « » бұрышты тырнақшаларын қолдан). "
+    "2. ТАБИҒИ ДИАЛОГ: Жауаптарыңды ЕШҚАШАН «Мен Доспын» деп өзіңді таныстырудан БАСТАМА! Тікелей сұраққа нақты жауап бер (мысалы: «Қазақстанның астанасы — Астана қаласы», «Қазақ әліпбиінде 42 әріп бар»). Тек пайдаланушы «сенің атың кім» немесе «сен кімсің» деп сұрағанда ғана өзіңді ата. "
+    "3. КІМ ЖАСАДЫ / КТО СОЗДАЛ: Егер сені кім жасады / кто создал тебя / кто твой создатель деп сұраса — сөзбе-сөз былай жауап бер: «Мой создатель гений, миллиардер, плейбой, филантроп — Сабитов Ерасыл» (немесе қазақша: «Менің жасаушым данышпан, миллиардер, плейбой, филантроп — Сабитов Ерасыл»). "
+    "4. Жауаптарың нақты, қысқа әрі нұсқа болсын — максимум 1-2 сөйлем (дауыстық колонка ұзақ монолог айтпауы керек, 25 сөзден аспасын). "
+    "5. [КОНТЕКСТ] блогында берілген уақыт, күн, ауа райы, доллар бағамы, медиаплеер жағдайы және интернет деректерін негізге ал, бірақ блокты тікелей қайталама. "
+    "6. Медиаплеер, дыбыс, экран әрекеттерін (action) ТЕК пайдаланушы оны анық сұрағанда ғана таңда, әйтпесе \"none\". "
+    "7. Сен MacBook-тағы қолданбалар мен бейнелерді action арқылы өзің басқара аласың — қолмен жаса деп ешқашан айтпа. "
+    "8. Сілтемелер мен URL мекенжайларын ЕШҚАШАН дауыстап айтпа және жазба. "
+    "9. Жауап ішінде қос тырнақша қолданба (тек « » бұрышты тырнақшаларын қолдан). "
     "Верни ТОЛЬКО JSON с ключами строго в таком порядке:\n"
     "1. \"action\": одно из [\"none\", \"play_pause\", \"next_track\", \"prev_track\", "
     "\"volume_up\", \"volume_down\", \"set_volume\", \"mute\", \"seek_forward\", \"seek_backward\", "
@@ -1902,7 +1955,9 @@ def query_local_llm(user_text: str, current_state: dict, on_sentence=None) -> di
 
     parsed = _safe_parse_llm_json(content)
     if spoken_txt:
-        parsed["spoken"] = spoken_txt.strip()
+        parsed["spoken"] = _strip_name_intro(spoken_txt.strip(), user_text)
+    elif parsed.get("spoken"):
+        parsed["spoken"] = _strip_name_intro(str(parsed["spoken"]).strip(), user_text)
     if not parsed.get("reply") and parsed.get("spoken"):
         parsed["reply"] = _short_reply(parsed["spoken"])
 
@@ -2032,7 +2087,9 @@ def query_gemini(user_text: str, current_state: dict, on_sentence=None) -> dict:
 
         parsed = _safe_parse_llm_json(content)
         if spoken_txt:
-            parsed["spoken"] = spoken_txt.strip()
+            parsed["spoken"] = _strip_name_intro(spoken_txt.strip(), user_text)
+        elif parsed.get("spoken"):
+            parsed["spoken"] = _strip_name_intro(str(parsed["spoken"]).strip(), user_text)
         if not parsed.get("reply") and parsed.get("spoken"):
             parsed["reply"] = _short_reply(parsed["spoken"])
 
@@ -2291,11 +2348,18 @@ def process_voice_command(
 
     # Потоковая озвучка: речевая сессия создаётся при первом готовом предложении от LLM
     stream_session = {}
+    first_sentence_sent = [False]
 
     def _on_sentence(sentence: str):
+        s_clean = sentence.strip()
+        if not first_sentence_sent[0]:
+            s_clean = _strip_name_intro(s_clean, command_text)
+        if not s_clean:
+            return
+        first_sentence_sent[0] = True
         if "s" not in stream_session:
             stream_session["s"] = SpeechSession()
-        stream_session["s"].feed(sentence)
+        stream_session["s"].feed(s_clean)
 
     try:
         llm_res = query_llm(command_text, current_state, on_sentence=_on_sentence)
@@ -2304,6 +2368,8 @@ def process_voice_command(
         val = int(val) if isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()) else num_val
         spoken = str(llm_res.get("spoken") or "").strip()
         reply = str(llm_res.get("reply") or "").strip()
+        spoken = _strip_name_intro(spoken, command_text)
+        reply = _strip_name_intro(reply, command_text)
         target_emotion = str(llm_res.get("emotion") or "speaking").strip()
         if target_emotion not in ("happy", "speaking", "thinking", "confused", "sleepy"):
             target_emotion = "speaking"
