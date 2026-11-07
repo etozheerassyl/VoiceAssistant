@@ -12,7 +12,7 @@
 
 // 2. Сетевой адрес MacBook в локальной сети Wi-Fi
 // Узнать IP MacBook можно в Терминале командой: ipconfig getifaddr en0
-#define SERVER_HOST       "192.168.0.104"
+#define SERVER_HOST       "192.168.0.106"
 #define SERVER_PORT       8765
 
 // 3. Токен авторизации (должен совпадать с AUTH_TOKEN в server.py)
